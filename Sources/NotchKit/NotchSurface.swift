@@ -19,6 +19,9 @@ final class NotchSurface {
     private let content: NotchContent
     private let state = NotchState()
     private var peekEnd: DispatchWorkItem?
+    private var wingsEnd: DispatchWorkItem?
+    /// Counts closed-shape changes, so only the latest one trims the window.
+    private var settleGeneration = 0
     /// Accumulated trackpad travel in the current two-finger gesture, in
     /// finger direction (down and right are positive).
     private var gestureTravel = CGPoint.zero
@@ -46,6 +49,8 @@ final class NotchSurface {
         static let close = Animation.spring(response: 0.45, dampingFraction: 1.0)
         /// How long `close` takes to come to rest, before the window shrinks.
         static let closeSettle: TimeInterval = 0.5
+        /// Wings melting into the line and growing back out of it.
+        static let melt = Animation.spring(response: 0.5, dampingFraction: 0.86)
     }
 
     var isShown: Bool { panel?.isVisible == true }
@@ -76,7 +81,8 @@ final class NotchSurface {
         }
         if !panel.isVisible {
             state.expanded = false
-            state.peeking = false
+            state.compact.peeking = false
+            state.compact.wingsForced = false
             panel.setFrame(currentFrame, display: true)
             panel.orderFrontRegardless()
         }
@@ -86,9 +92,11 @@ final class NotchSurface {
         heldOpen = false
         cancelPending()
         peekEnd?.cancel()
+        wingsEnd?.cancel()
         watchHover(false)
         state.expanded = false
-        state.peeking = false
+        state.compact.peeking = false
+        state.compact.wingsForced = false
         panel?.orderOut(nil)
     }
 
@@ -109,16 +117,10 @@ final class NotchSurface {
     func peek(for duration: TimeInterval) {
         guard let panel, panel.isVisible, !state.expanded else { return }
         peekEnd?.cancel()
-        if !state.peeking {
-            // As when opening: grow the window, settle the layout, then animate.
-            state.peeking = true
-            let target = currentFrame
-            state.peeking = false
-            panel.setFrame(target, display: true)
-            panel.contentView?.layoutSubtreeIfNeeded()
-            DispatchQueue.main.async { [weak self] in
-                withAnimation(Self.animation(Timing.open)) { self?.state.peeking = true }
-            }
+        if !state.compact.peeking {
+            var next = state.compact
+            next.peeking = true
+            setCompact(next, animation: Timing.open)
         }
         let end = DispatchWorkItem { [weak self] in self?.endPeek() }
         peekEnd = end
@@ -126,8 +128,59 @@ final class NotchSurface {
     }
 
     private func endPeek() {
-        guard state.peeking, !state.expanded else { return }
-        withAnimation(Self.animation(Timing.close)) { state.peeking = false }
+        guard state.compact.peeking, !state.expanded else { return }
+        var next = state.compact
+        next.peeking = false
+        setCompact(next, animation: Timing.close)
+    }
+
+    /// Brings the wings out for `duration` even without room for them.
+    func showWings(for duration: TimeInterval) {
+        guard let panel, panel.isVisible, !state.expanded else { return }
+        wingsEnd?.cancel()
+        if !state.compact.wingsForced {
+            var next = state.compact
+            next.wingsForced = true
+            setCompact(next, animation: Timing.open)
+        }
+        let end = DispatchWorkItem { [weak self] in self?.endForcedWings() }
+        wingsEnd = end
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: end)
+    }
+
+    private func endForcedWings() {
+        guard state.compact.wingsForced else { return }
+        let next = state.compact.afterForcedWings
+        if next.peeking != state.compact.peeking { peekEnd?.cancel() }
+        setCompact(next, animation: Timing.close)
+    }
+
+    /// Whether the menu bar has room for the wings right now.
+    func setWingsFit(_ fit: Bool) {
+        guard state.compact.wingsFit != fit else { return }
+        var next = state.compact
+        next.wingsFit = fit
+        setCompact(next, animation: Timing.close)
+    }
+
+    /// Moves the closed notch to another state. As when opening: the window
+    /// first grows to hold both shapes, then the change animates inside it,
+    /// then the window is trimmed to the new shape.
+    private func setCompact(_ next: CompactState, animation: Animation) {
+        guard next != state.compact else { return }
+        guard let panel, panel.isVisible, !state.expanded else {
+            // Out of sight; it applies when the notch next closes or shows.
+            state.compact = next
+            return
+        }
+        let target = frame(expanded: false, compact: next)
+        panel.setFrame(panel.frame.union(target), display: true)
+        panel.contentView?.layoutSubtreeIfNeeded()
+        // Wings coming or going is the slower, softer change.
+        let animation = next.showsWings != state.compact.showsWings ? Timing.melt : animation
+        DispatchQueue.main.async { [weak self] in
+            withAnimation(Self.animation(animation)) { self?.state.compact = next }
+        }
         shrinkWindowWhenSettled()
     }
 
@@ -223,6 +276,7 @@ final class NotchSurface {
         guard let panel, state.expanded != expanded else { return }
         if expanded {
             peekEnd?.cancel()
+            wingsEnd?.cancel()
             // Grow the window first and settle the layout at that size without
             // animation; otherwise the re-centring animates too and the shape
             // flies in from the old window's corner. Then open inside it.
@@ -231,7 +285,8 @@ final class NotchSurface {
             DispatchQueue.main.async { [weak self] in
                 withAnimation(Self.animation(Timing.open)) {
                     self?.state.expanded = true
-                    self?.state.peeking = false
+                    self?.state.compact.peeking = false
+                    self?.state.compact.wingsForced = false
                 }
             }
             Self.haptic()
@@ -247,9 +302,11 @@ final class NotchSurface {
     /// Shrinks the window once the shape has, so the transparent area around
     /// it never blocks clicks on the menu bar.
     private func shrinkWindowWhenSettled() {
+        settleGeneration += 1
+        let generation = settleGeneration
         let delay = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : Timing.closeSettle
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, let panel = self.panel, !self.state.expanded, !self.state.peeking else { return }
+            guard let self, let panel = self.panel, generation == self.settleGeneration, !self.state.expanded else { return }
             panel.setFrame(self.currentFrame, display: true)
         }
     }
@@ -307,8 +364,12 @@ final class NotchSurface {
     private var currentFrame: CGRect { frame(expanded: state.expanded) }
 
     private func frame(expanded: Bool) -> CGRect {
+        frame(expanded: expanded, compact: state.compact)
+    }
+
+    private func frame(expanded: Bool, compact: CompactState) -> CGRect {
         guard let notch = geometry?.rect else { return .zero }
-        return state.layout.windowFrame(notchRect: notch, expanded: expanded, peeking: state.peeking)
+        return state.layout.windowFrame(notchRect: notch, expanded: expanded, peeking: compact.peeking, wings: compact.showsWings)
     }
 
     private func makePanel() -> NotchPanel {
@@ -316,7 +377,7 @@ final class NotchSurface {
         let container = NotchContainerView()
         container.onPointerEntered = { [weak self] in self?.pointerEntered() }
         container.onPointerExited = { [weak self] in self?.pointerExited() }
-        let hosting = FirstMouseHostingView(rootView: NotchView(state: state, content: content, onTap: { [weak self] in self?.clicked() }))
+        let hosting = FirstMouseHostingView(rootView: NotchView(state: state, content: content, onTap: { [weak self] _ in self?.clicked() }))
         hosting.onScroll = { [weak self] event in self?.scrolled(event) }
         hosting.autoresizingMask = [.width, .height]
         container.addSubview(hosting)
