@@ -19,6 +19,13 @@ final class CompactPolicyTests: XCTestCase {
         XCTAssertFalse(CompactPolicy.wingsFit(clearance: NotchClearance(leading: 142.5, trailing: 0), footprint: 56))
     }
 
+    func testSharingTheNotchOnlyTheOwnSideHasToFit() {
+        let tightLeft = NotchClearance(leading: 20, trailing: 377.5)
+        XCTAssertFalse(CompactPolicy.wingsFit(clearance: tightLeft, footprint: 56, sides: .leading))
+        XCTAssertTrue(CompactPolicy.wingsFit(clearance: tightLeft, footprint: 56, sides: .trailing))
+        XCTAssertFalse(CompactPolicy.wingsFit(clearance: tightLeft, footprint: 56, sides: .both))
+    }
+
     func testAnUnmeasuredSideCountsAsFree() {
         XCTAssertTrue(CompactPolicy.wingsFit(clearance: NotchClearance(), footprint: 56))
         XCTAssertTrue(CompactPolicy.wingsFit(clearance: NotchClearance(leading: nil, trailing: 100), footprint: 56))
@@ -57,6 +64,24 @@ final class CompactStateTests: XCTestCase {
         XCTAssertTrue(state.showsLine)
     }
 
+    func testARequestHangsItsPillOnlyWithoutWings() {
+        XCTAssertFalse(CompactState(wingsFit: false).showsRequestPill)
+        XCTAssertTrue(CompactState(wingsFit: false, requested: true).showsRequestPill)
+        XCTAssertFalse(CompactState(wingsFit: true, requested: true).showsRequestPill)
+        XCTAssertFalse(CompactState(wingsFit: false, wingsForced: true, requested: true).showsRequestPill)
+        XCTAssertFalse(CompactState(wingsFit: false, peeking: true, requested: true).showsRequestPill)
+    }
+
+    func testSteppingAsideTakesThePillAway() {
+        XCTAssertFalse(CompactState(wingsFit: false, requested: true, yielded: true).showsRequestPill)
+        XCTAssertTrue(CompactState(wingsFit: false, requested: true, sides: .trailing).showsRequestPill)
+    }
+
+    func testARequestOutlivesForcedWings() {
+        let state = CompactState(wingsFit: false, wingsForced: true, requested: true).afterForcedWings
+        XCTAssertTrue(state.showsRequestPill)
+    }
+
     func testWithRoomThePeekOutlivesForcedWings() {
         let state = CompactState(wingsFit: true, wingsForced: true, peeking: true).afterForcedWings
         XCTAssertEqual(state, CompactState(wingsFit: true, peeking: true))
@@ -83,6 +108,14 @@ final class LineLayoutTests: XCTestCase {
     func testLineWindowIsExactlyTheNotchAndChin() {
         let frame = layout.windowFrame(notchRect: notchRect, expanded: false, peeking: false, wings: false)
         XCTAssertEqual(frame, CGRect(x: 645.5, y: 919, width: 179, height: 37))
+    }
+
+    func testTheRequestPillHangsCentredUnderTheChin() {
+        var layout = layout
+        layout.requestSize = CGSize(width: 220, height: 32)
+        let frame = layout.requestFrame(notchRect: notchRect)
+        XCTAssertEqual(frame, CGRect(x: 625, y: 881, width: 220, height: 32))
+        XCTAssertEqual(frame.midX, notchRect.midX)
     }
 
     func testWithoutWingsTheTopCornersAreSquare() {

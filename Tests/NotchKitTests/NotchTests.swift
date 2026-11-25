@@ -25,4 +25,41 @@ final class NotchTests: XCTestCase {
         XCTAssertFalse(notch.isExpanded)
         XCTAssertEqual(notch.expandedContentSize, CGSize(width: 360, height: 120))
     }
+
+    func testWithoutAResidencyThereAreNoResidents() {
+        let notch = Notch {
+            EmptyView()
+        } compactTrailing: {
+            EmptyView()
+        } expanded: {
+            EmptyView()
+        }
+        XCTAssertTrue(notch.otherResidents.isEmpty)
+        notch.handOver(to: NotchResident(id: "perch", side: .trailing, isExpanded: false, isRequesting: false))
+        XCTAssertFalse(notch.isExpanded)
+    }
+
+    func testAHiddenNotchIgnoresOpeningAndRequests() {
+        var configuration = NotchConfiguration()
+        configuration.keyboardFocus = .whenOpenedDeliberately
+        configuration.requestSize = CGSize(width: 200, height: 28)
+        let notch = Notch(configuration: configuration) {
+            EmptyView()
+        } compactTrailing: {
+            EmptyView()
+        } expanded: {
+            EmptyView()
+        } request: {
+            Text("Keyboard wanted")
+        }
+        var collapses = 0
+        notch.onCollapse = { collapses += 1 }
+        notch.onKeyDown = { _ in true }
+        notch.expand()
+        notch.showRequest()
+        notch.collapse()
+        notch.hideRequest()
+        XCTAssertFalse(notch.isExpanded)
+        XCTAssertEqual(collapses, 0)
+    }
 }

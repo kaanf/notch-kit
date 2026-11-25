@@ -23,9 +23,30 @@ public struct NotchConfiguration {
     /// Accessibility permission, which NotchKit never asks for itself; the
     /// trailing side needs none.
     public var measuredSides: NotchSides = []
+    /// Whether the open notch takes keyboard input. Never by default.
+    public var keyboardFocus: NotchKeyboardFocus = .never
+    /// The size of the request pill under the notch; see `Notch.showRequest()`.
+    public var requestSize = CGSize(width: 220, height: 32)
+    /// The app's place in a notch it shares with other NotchKit apps. Nil
+    /// by default: the app has the notch to itself and looks for nobody.
+    /// See `Notch.otherResidents`.
+    public var residency: NotchResidency?
 
     /// The defaults; change the properties you need.
     public init() {}
+}
+
+/// When the open notch takes keyboard input.
+public enum NotchKeyboardFocus {
+    /// Never on its own; only a click on a text field inside it gives it
+    /// the keyboard.
+    case never
+    /// When it was opened on purpose: by a click, a swipe down,
+    /// `toggleExpanded()` or `expand(held:)`. Opening on hover takes
+    /// nothing, so brushing the notch doesn't cut off typing elsewhere.
+    /// While it has the keyboard the notch stays open with the pointer away,
+    /// and on closing the keyboard goes back to where it was.
+    case whenOpenedDeliberately
 }
 
 /// A horizontal two-finger swipe on the notch, in finger direction.
@@ -47,12 +68,29 @@ public enum NotchSwipe {
 /// screen without a camera notch, a notch-sized stand-in at the top centre
 /// of the main screen takes its place.
 ///
+/// Other NotchKit apps may live in the same notch. With a residency
+/// (`NotchConfiguration.residency`) the apps share it: half each while
+/// closed, and one open panel between them; see `otherResidents`.
+///
 /// Create and use it on the main thread, after the app has launched.
 @MainActor
 public final class Notch {
     /// Called when the notch opens, for the app to refresh what it shows.
     public var onExpand: (() -> Void)? {
         didSet { surface.onExpand = onExpand }
+    }
+
+    /// Called when the notch closes, however it came to: the pointer left,
+    /// `collapse()`, a click elsewhere, or `hide()` while open.
+    public var onCollapse: (() -> Void)? {
+        didSet { surface.onCollapse = onCollapse }
+    }
+
+    /// Called for a key press while the notch has keyboard focus, before
+    /// anything in the notch sees it. Return true if the key was used;
+    /// false passes it on, to a text field in the notch for one.
+    public var onKeyDown: ((NSEvent) -> Bool)? {
+        didSet { surface.onKeyDown = onKeyDown }
     }
 
     /// Called for a horizontal two-finger swipe on the notch.
@@ -81,6 +119,20 @@ public final class Notch {
         didSet { clearanceChanged() }
     }
 
+    /// The other apps in the notch whose notch is on screen, by id. Empty
+    /// without `NotchConfiguration.residency`, and when there are none.
+    ///
+    /// With company, the closed notch is split down the middle: each app
+    /// draws its own wing and its half of the line, and answers the pointer
+    /// there only. One panel is open at a time. While another app's is,
+    /// this one is out of sight, and hover and click don't open it; a
+    /// shortcut or `expand(held:)` closes the other's panel and opens this.
+    public var otherResidents: [NotchResident] { coordinator?.residents ?? [] }
+
+    /// Called when `otherResidents` changes: an app came or went, opened or
+    /// closed its panel, or put up or took down a request.
+    public var onResidentsChange: (() -> Void)?
+
     /// Whether the notch is on screen, open or closed.
     public var isVisible: Bool { surface.isShown }
     /// Whether the notch is open.
@@ -91,6 +143,8 @@ public final class Notch {
     private let surface: NotchSurface
     private let configuration: NotchConfiguration
     private let clearanceMonitor: ClearanceMonitor
+    /// The app's seat among the apps that share the notch, if it took one.
+    private let coordinator: ResidencyCoordinator?
     /// What a wing takes beside the notch, outward corner included.
     private let wingFootprint: CGFloat
     /// The app asked for the notch, but a full-screen Space is keeping it away.
@@ -105,23 +159,28 @@ public final class Notch {
     ///     no room for them: a strip 3 points high under the notch.
     ///   - expanded: Shown when the notch is open, sized by `expandedContentSize`.
     ///   - peek: Shown under the closed notch during `peek(for:)`.
+    ///   - request: Shown in a pill under the notch after `showRequest()`,
+    ///     sized by `NotchConfiguration.requestSize`.
     ///   - menu: The items of the notch's right-click menu.
-    public init<Leading: View, Trailing: View, Line: View, Expanded: View, Peek: View, Menu: View>(
+    public init<Leading: View, Trailing: View, Line: View, Expanded: View, Peek: View, Request: View, Menu: View>(
         configuration: NotchConfiguration = NotchConfiguration(),
         @ViewBuilder compactLeading: () -> Leading,
         @ViewBuilder compactTrailing: () -> Trailing,
         @ViewBuilder compactLine: () -> Line = { EmptyView() },
         @ViewBuilder expanded: () -> Expanded,
         @ViewBuilder peek: () -> Peek = { EmptyView() },
+        @ViewBuilder request: () -> Request = { EmptyView() },
         @ViewBuilder menu: () -> Menu = { EmptyView() }
     ) {
         let content = NotchContent(compactLeading: AnyView(compactLeading()), compactTrailing: AnyView(compactTrailing()),
                                    compactLine: AnyView(compactLine()),
-                                   expanded: AnyView(expanded()), peek: AnyView(peek()), menu: AnyView(menu()))
+                                   expanded: AnyView(expanded()), peek: AnyView(peek()), request: AnyView(request()),
+                                   menu: AnyView(menu()))
         self.configuration = configuration
         surface = NotchSurface(configuration: configuration, content: content)
         wingFootprint = configuration.wingWidth + NotchLayout.closedRadii.top
         clearanceMonitor = ClearanceMonitor(sides: configuration.measuredSides, probeWidth: wingFootprint)
+        coordinator = Self.coordinator(for: configuration.residency)
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -135,6 +194,31 @@ public final class Notch {
             MainActor.assumeIsolated { self?.spaceChanged() }
         }
         clearanceMonitor.onChange = { [weak self] _ in self?.clearanceChanged() }
+        if let coordinator { join(coordinator) }
+    }
+
+    private static func coordinator(for residency: NotchResidency?) -> ResidencyCoordinator? {
+        guard let residency else { return nil }
+        guard let side = ResidentSide(residency.side), !residency.id.isEmpty else {
+            NSLog("NotchKit: a residency needs an id and exactly one side, .leading or .trailing; carrying on without coordination")
+            return nil
+        }
+        return ResidencyCoordinator(id: residency.id, side: side, channel: DistributedResidencyChannel())
+    }
+
+    /// Lets the other apps in the notch decide, with this one, who opens
+    /// and who draws where.
+    private func join(_ coordinator: ResidencyCoordinator) {
+        surface.openGate = { summoned in coordinator.wantOpen(summoned: summoned) }
+        surface.onRelease = { coordinator.released() }
+        coordinator.onOpen = { [weak surface] in surface?.openGranted() }
+        coordinator.onClose = { [weak surface] in surface?.openRevoked() }
+        coordinator.onSummoned = { [weak surface] in surface?.expand(held: true) }
+        coordinator.onArrangementChange = { [weak self] _ in self?.arrangementChanged() }
+        coordinator.onResidentsChange = { [weak self] in self?.onResidentsChange?() }
+        coordinator.watchSystem()
+        coordinator.start()
+        arrangementChanged()
     }
 
     deinit {
@@ -144,6 +228,7 @@ public final class Notch {
 
     /// Puts the notch on screen, closed. Does nothing if it's already there.
     public func show() {
+        defer { coordinator?.setVisible(surface.isShown) }
         guard let geometry = NotchGeometry.current else { return hide() }
         if configuration.hidesInFullscreen, FullscreenDetector.isFullscreen(displayID: geometry.displayID) {
             hiddenForFullscreen = true
@@ -156,6 +241,7 @@ public final class Notch {
 
     /// Takes the notch off screen.
     public func hide() {
+        defer { coordinator?.setVisible(surface.isShown) }
         hiddenForFullscreen = false
         surface.hide()
         clearanceMonitor.stop()
@@ -165,6 +251,44 @@ public final class Notch {
     /// action for a global shortcut. Beeps when the notch isn't showing.
     public func toggleExpanded() {
         surface.toggleFromKeyboard()
+    }
+
+    /// Opens the notch. Held, it stays open until `collapse()`, the shortcut
+    /// or a click elsewhere, as after `toggleExpanded()`; otherwise it
+    /// closes once the pointer is away from it, as after a hover. Ignored
+    /// while the notch is hidden.
+    public func expand(held: Bool = true) {
+        surface.expand(held: held)
+    }
+
+    /// Closes the notch if it's open.
+    public func collapse() {
+        surface.collapse()
+    }
+
+    /// Shows the request content until `hideRequest()`: something the app
+    /// wants answered, with no time limit. With room for the wings NotchKit
+    /// draws nothing, and the app shows the request in a wing itself;
+    /// without room, a pill hangs under the notch. A click on the pill
+    /// opens the notch, and the pill is away while the notch is open, this
+    /// app's or another's; the other apps see `NotchResident.isRequesting`.
+    public func showRequest() {
+        surface.setRequested(true)
+        coordinator?.setRequesting(true)
+    }
+
+    /// Takes the request content away.
+    public func hideRequest() {
+        surface.setRequested(false)
+        coordinator?.setRequesting(false)
+    }
+
+    /// Closes this app's panel and opens `resident`'s, as that app's own
+    /// shortcut would: the action for a switch button drawn from
+    /// `otherResidents`.
+    public func handOver(to resident: NotchResident) {
+        surface.collapse()
+        coordinator?.handOver(to: resident.id)
     }
 
     /// Shows the peek content under the closed notch for `duration` seconds.
@@ -182,9 +306,20 @@ public final class Notch {
     }
 
     private func clearanceChanged() {
-        let clearance = clearance
-        surface.setWingsFit(CompactPolicy.wingsFit(clearance: clearance, footprint: wingFootprint))
+        refit()
         onClearanceChange?(clearance)
+    }
+
+    /// Sharing the notch, only this app's own side has to have room.
+    private func refit() {
+        let sides = coordinator?.arrangement.sides ?? .both
+        surface.setWingsFit(CompactPolicy.wingsFit(clearance: clearance, footprint: wingFootprint, sides: sides))
+    }
+
+    private func arrangementChanged() {
+        guard let arrangement = coordinator?.arrangement else { return }
+        surface.setArrangement(sides: arrangement.sides, yielded: arrangement.yielded)
+        refit()
     }
 
     private func spaceChanged() {

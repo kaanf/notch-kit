@@ -10,6 +10,9 @@ import SwiftUI
 
 /// Borderless and non-activating, above the menu bar on every Space.
 final class NotchPanel: NSPanel {
+    /// Sees key presses before the panel's views; true means it used one.
+    var onKeyDown: ((NSEvent) -> Bool)?
+
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         level = .statusBar
@@ -26,6 +29,11 @@ final class NotchPanel: NSPanel {
     /// It sits over the menu bar on purpose; don't push it below.
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
     override var canBecomeKey: Bool { true }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, onKeyDown?(event) == true { return }
+        super.sendEvent(event)
+    }
 }
 
 /// Reports the pointer entering and leaving the whole panel.

@@ -16,6 +16,8 @@ struct NotchLayout: Equatable {
     var wingWidth: CGFloat = 50
     /// Height added under the closed notch for a peek.
     var peekHeight: CGFloat = 22
+    /// The request pill under the notch.
+    var requestSize = CGSize(width: 220, height: 32)
     /// The app's open content, which sits below the notch's height.
     var expandedContentSize = CGSize(width: 360, height: 112)
 
@@ -33,10 +35,24 @@ struct NotchLayout: Equatable {
     static let lineHeight: CGFloat = 3
     /// The line stops short of the chin's rounded corners.
     static let lineInset: CGFloat = 16
+    /// Between the chin and the request pill under it.
+    static let requestGap: CGFloat = 6
+    /// Between the two halves of a line that two apps share.
+    static let lineGap: CGFloat = 4
 
     /// Without wings the top corners have nothing to curve out from.
     static func radii(expanded: Bool, wings: Bool = true) -> (top: CGFloat, bottom: CGFloat) {
         expanded ? openRadii : wings ? closedRadii : (top: 0, bottom: closedRadii.bottom)
+    }
+
+    /// The corners of the half or whole that `sides` names. Where a half
+    /// meets the other app's, in the middle of the notch, it is square.
+    static func corners(expanded: Bool, wings: Bool = true, sides: NotchSides = .both) -> NotchCorners {
+        let radii = radii(expanded: expanded, wings: wings)
+        if expanded || sides == .both { return NotchCorners(top: radii.top, bottom: radii.bottom) }
+        let leading = sides == .leading
+        return NotchCorners(topLeading: leading ? radii.top : 0, topTrailing: leading ? 0 : radii.top,
+                            bottomLeading: leading ? radii.bottom : 0, bottomTrailing: leading ? 0 : radii.bottom)
     }
 
     /// The black body, not counting the outward top corners.
@@ -62,6 +78,11 @@ struct NotchLayout: Equatable {
         x < bodyWidth / 2 ? .leading : .trailing
     }
 
+    /// The width of the notch that falls to `sides`: all of it, or half.
+    func notchShare(_ sides: NotchSides) -> CGFloat {
+        sides == .both ? notch.width : notch.width / 2
+    }
+
     var expandedSize: CGSize {
         CGSize(width: max(expandedContentSize.width, notch.width + Self.minimumOverhang * 2),
                height: notch.height + expandedContentSize.height)
@@ -69,26 +90,52 @@ struct NotchLayout: Equatable {
 
     /// The body's size in a state; open wins over peeking, and a peek
     /// always has its wings.
-    func bodySize(expanded: Bool, peeking: Bool, wings: Bool = true) -> CGSize {
-        expanded ? expandedSize : peeking ? peekSize : wings ? compactSize : lineSize
+    /// An app that shares the notch has half of the closed body: one wing
+    /// and half the notch. Open, the body is whole whoever else is there.
+    func bodySize(expanded: Bool, peeking: Bool, wings: Bool = true, sides: NotchSides = .both) -> CGSize {
+        if expanded { return expandedSize }
+        let whole = peeking ? peekSize : wings ? compactSize : lineSize
+        return CGSize(width: sides == .both ? whole.width : whole.width / 2, height: whole.height)
+    }
+
+    /// Where the body's left edge is, from the middle of the notch: a
+    /// whole body is centred there, a half ends or begins there.
+    func bodyOrigin(expanded: Bool, peeking: Bool, wings: Bool = true, sides: NotchSides = .both) -> CGFloat {
+        let width = bodySize(expanded: expanded, peeking: peeking, wings: wings, sides: sides).width
+        if expanded || sides == .both { return -width / 2 }
+        return sides == .leading ? -width : 0
+    }
+
+    /// The request pill's frame: its own window, centred under the notch
+    /// and its chin. `notchRect` is in global screen coordinates.
+    func requestFrame(notchRect: CGRect) -> CGRect {
+        CGRect(x: notchRect.midX - requestSize.width / 2,
+               y: notchRect.maxY - lineSize.height - Self.requestGap - requestSize.height,
+               width: requestSize.width, height: requestSize.height)
     }
 
     /// The window around the body: wide enough for the outward top corners
     /// and, open, with room for the shadow.
-    func windowSize(expanded: Bool, peeking: Bool, wings: Bool = true) -> CGSize {
-        let body = bodySize(expanded: expanded, peeking: peeking, wings: wings)
+    func windowSize(expanded: Bool, peeking: Bool, wings: Bool = true, sides: NotchSides = .both) -> CGSize {
+        let body = bodySize(expanded: expanded, peeking: peeking, wings: wings, sides: sides)
         if expanded {
             return CGSize(width: body.width + Self.openRadii.top * 2 + Self.shadowMargin * 2,
                           height: body.height + Self.shadowMargin)
         }
-        let top = Self.radii(expanded: false, wings: wings || peeking).top
-        return CGSize(width: body.width + top * 2, height: body.height)
+        let corners = Self.corners(expanded: false, wings: wings || peeking, sides: sides)
+        return CGSize(width: body.width + corners.topLeading + corners.topTrailing, height: body.height)
     }
 
-    /// The window's frame, top-centred on the notch. `notchRect` is in
-    /// global screen coordinates (origin bottom left).
-    func windowFrame(notchRect: CGRect, expanded: Bool, peeking: Bool, wings: Bool = true) -> CGRect {
-        let size = windowSize(expanded: expanded, peeking: peeking, wings: wings)
-        return CGRect(x: notchRect.midX - size.width / 2, y: notchRect.maxY - size.height, width: size.width, height: size.height)
+    /// The window's frame, hung from the top of the notch: centred on it,
+    /// or to one side of its middle for a half. `notchRect` is in global
+    /// screen coordinates (origin bottom left).
+    func windowFrame(notchRect: CGRect, expanded: Bool, peeking: Bool, wings: Bool = true, sides: NotchSides = .both) -> CGRect {
+        let size = windowSize(expanded: expanded, peeking: peeking, wings: wings, sides: sides)
+        var x = notchRect.midX - size.width / 2
+        if !expanded, sides != .both {
+            let origin = bodyOrigin(expanded: false, peeking: peeking, wings: wings, sides: sides)
+            x = notchRect.midX + origin - Self.corners(expanded: false, wings: wings || peeking, sides: sides).topLeading
+        }
+        return CGRect(x: x, y: notchRect.maxY - size.height, width: size.width, height: size.height)
     }
 }
