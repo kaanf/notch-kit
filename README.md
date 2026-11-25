@@ -97,7 +97,7 @@ Wings sit over the menu bar, so an app with many menus, or a row of status items
 
 If a wing doesn't fit on either measured side, both wings go and the notch grows a small chin holding your `compactLine` view, a strip 3 points high, for a progress bar or the like. `showWings(for:)` brings the wings back for a moment, and a peek does the same for as long as it lasts.
 
-Measuring happens when the frontmost app changes, and the answer is remembered per app. Opening and closing menus measures nothing.
+Measuring happens when the frontmost app or Space changes and every five seconds while visible, so permission changes and changing menus or status items do not leave a stale result.
 
 **The probe.** macOS doesn't say where other apps' status items are. To find out, NotchKit adds an invisible status item of its own, named "NotchKit Clearance Probe", for about a quarter of a second per measurement: a new item lands at the left end of the row, and where it lands is the answer. A status item manager such as Ice or Bartender may list it briefly. If macOS can't place it, that side counts as full.
 

@@ -7,9 +7,8 @@
 
 import AppKit
 
-/// Keeps the clearance for the frontmost app: measures when the frontmost
-/// app changes and remembers the answer per app, so each app is measured
-/// once. Menus opening and closing don't trigger anything.
+/// Measures on activation and periodically while running. Permissions, menu
+/// titles and status items can change without the frontmost app changing.
 @MainActor
 final class ClearanceMonitor {
     /// Called on the main queue when the clearance changes.
@@ -22,7 +21,7 @@ final class ClearanceMonitor {
     /// The width the probe asks the menu bar for: what a wing takes.
     private let probeWidth: CGFloat
     private let probe = StatusItemProbe()
-    private var cache = ClearanceCache()
+    private var refreshTimer: Timer?
     private var activationObserver: Any?
     private var generation = 0
     private var running = false
@@ -37,6 +36,7 @@ final class ClearanceMonitor {
     }
 
     deinit {
+        refreshTimer?.invalidate()
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
     }
 
@@ -49,21 +49,25 @@ final class ClearanceMonitor {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.frontmostChanged() }
         }
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.frontmostChanged() }
+        }
         frontmostChanged()
     }
 
     func stop() {
         guard running else { return }
         running = false
+        refreshTimer?.invalidate()
+        refreshTimer = nil
         generation += 1
         probe.cancel()
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
         activationObserver = nil
     }
 
-    /// The screens changed: every remembered measurement is off.
+    /// Re-measure after the screen or Space changes.
     func invalidate() {
-        cache.removeAll()
         if running { frontmostChanged() }
     }
 
@@ -71,10 +75,6 @@ final class ClearanceMonitor {
         generation += 1
         probe.cancel()
         guard let app = NSWorkspace.shared.frontmostApplication else { return }
-        if let id = app.bundleIdentifier, let known = cache[id] {
-            clearance = known
-            return
-        }
         let generation = generation
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay) { [weak self] in
             guard let self, generation == self.generation else { return }
@@ -88,9 +88,6 @@ final class ClearanceMonitor {
         let notch = geometry.rect
         let sides = sides
         let pid = app.processIdentifier
-        // An app still launching hasn't built all its menus; measure, but
-        // don't remember the answer.
-        let cacheable = app.isFinishedLaunching
 
         Self.readQueue.async { [weak self] in
             let menus = sides.contains(.leading) ? MenuBarReader.menuItemFrames(of: pid) : nil
@@ -99,19 +96,18 @@ final class ClearanceMonitor {
                 var result = NotchClearance()
                 result.leading = menus.map { ClearanceMath.leading(menuItems: $0, notch: notch, screen: screen) }
                 let menusPass = menus.map { ClearanceMath.menusPassNotch(menuItems: $0, notch: notch, screen: screen) } ?? false
-                guard sides.contains(.trailing) else { return self.finish(result, for: app, cacheable: cacheable) }
+                guard sides.contains(.trailing) else { return self.finish(result) }
                 self.probe.measure(width: self.probeWidth) { [weak self] frame, probeScreen in
                     guard let self, generation == self.generation else { return }
                     result.trailing = menusPass ? 0 : ClearanceMath.trailing(
                         probe: frame, probeScreen: probeScreen ?? screen, notch: notch, notchScreen: screen)
-                    self.finish(result, for: app, cacheable: cacheable)
+                    self.finish(result)
                 }
             }
         }
     }
 
-    private func finish(_ result: NotchClearance, for app: NSRunningApplication, cacheable: Bool) {
-        if cacheable, let id = app.bundleIdentifier { cache[id] = result }
+    private func finish(_ result: NotchClearance) {
         clearance = result
     }
 }

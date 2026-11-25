@@ -323,6 +323,7 @@ public final class Notch {
     }
 
     private func spaceChanged() {
+        clearanceMonitor.invalidate()
         if configuration.hidesInFullscreen {
             recheckFullscreen()
             // The backdrop that marks a full-screen Space can land a moment
