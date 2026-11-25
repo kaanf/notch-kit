@@ -18,6 +18,11 @@ public struct NotchConfiguration {
     /// Takes the notch off screen while its display shows a full-screen
     /// Space, and puts it back afterwards. Off by default: the notch stays.
     public var hidesInFullscreen = false
+    /// The sides of the notch whose free menu bar space is measured, for
+    /// `Notch.clearance`. None by default. The leading side needs
+    /// Accessibility permission, which NotchKit never asks for itself; the
+    /// trailing side needs none.
+    public var measuredSides: NotchSides = []
 
     /// The defaults; change the properties you need.
     public init() {}
@@ -60,6 +65,16 @@ public final class Notch {
         set { surface.expandedContentSize = newValue }
     }
 
+    /// The free menu bar space beside the notch for the frontmost app, on
+    /// the sides `NotchConfiguration.measuredSides` names. Measured while
+    /// the notch is showing, when the frontmost app changes.
+    public var clearance: NotchClearance { clearanceMonitor.clearance }
+
+    /// Called when `clearance` changes.
+    public var onClearanceChange: ((NotchClearance) -> Void)? {
+        didSet { clearanceMonitor.onChange = onClearanceChange }
+    }
+
     /// Whether the notch is on screen, open or closed.
     public var isVisible: Bool { surface.isShown }
     /// Whether the notch is open.
@@ -69,6 +84,7 @@ public final class Notch {
     /// are per screen, so showing on several is a matter of holding more.
     private let surface: NotchSurface
     private let configuration: NotchConfiguration
+    private let clearanceMonitor: ClearanceMonitor
     /// The app asked for the notch, but a full-screen Space is keeping it away.
     private var hiddenForFullscreen = false
     private var screenObserver: Any?
@@ -92,6 +108,8 @@ public final class Notch {
                                    expanded: AnyView(expanded()), peek: AnyView(peek()), menu: AnyView(menu()))
         self.configuration = configuration
         surface = NotchSurface(configuration: configuration, content: content)
+        clearanceMonitor = ClearanceMonitor(sides: configuration.measuredSides,
+                                            probeWidth: configuration.wingWidth + NotchLayout.closedRadii.top)
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -120,12 +138,14 @@ public final class Notch {
         }
         hiddenForFullscreen = false
         surface.show(at: geometry)
+        clearanceMonitor.start()
     }
 
     /// Takes the notch off screen.
     public func hide() {
         hiddenForFullscreen = false
         surface.hide()
+        clearanceMonitor.stop()
     }
 
     /// Opens the notch and holds it open, or closes it if it's open: the
@@ -162,6 +182,7 @@ public final class Notch {
     }
 
     private func screensChanged() {
+        clearanceMonitor.invalidate()
         if hiddenForFullscreen { return recheckFullscreen() }
         guard surface.isShown else { return }
         guard let geometry = NotchGeometry.current else { return hide() }
