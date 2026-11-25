@@ -15,6 +15,9 @@ public struct NotchConfiguration {
     public var wingWidth: CGFloat = 50
     /// Height added under the closed notch while peeking.
     public var peekHeight: CGFloat = 22
+    /// Takes the notch off screen while its display shows a full-screen
+    /// Space, and puts it back afterwards. Off by default: the notch stays.
+    public var hidesInFullscreen = false
 
     public init() {}
 }
@@ -61,6 +64,9 @@ public final class Notch {
     /// One surface, on the screen `NotchGeometry.current` picks. Surfaces
     /// are per screen, so showing on several is a matter of holding more.
     private let surface: NotchSurface
+    private let configuration: NotchConfiguration
+    /// The app asked for the notch, but a full-screen Space is keeping it away.
+    private var hiddenForFullscreen = false
     private var screenObserver: Any?
     private var spaceObserver: Any?
 
@@ -80,6 +86,7 @@ public final class Notch {
     ) {
         let content = NotchContent(compactLeading: AnyView(compactLeading()), compactTrailing: AnyView(compactTrailing()),
                                    expanded: AnyView(expanded()), peek: AnyView(peek()), menu: AnyView(menu()))
+        self.configuration = configuration
         surface = NotchSurface(configuration: configuration, content: content)
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
@@ -91,7 +98,7 @@ public final class Notch {
         spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.surface.bringForward() }
+            MainActor.assumeIsolated { self?.spaceChanged() }
         }
     }
 
@@ -103,11 +110,17 @@ public final class Notch {
     /// Puts the notch on screen, closed. Does nothing if it's already there.
     public func show() {
         guard let geometry = NotchGeometry.current else { return hide() }
+        if configuration.hidesInFullscreen, FullscreenDetector.isFullscreen(displayID: geometry.displayID) {
+            hiddenForFullscreen = true
+            return surface.hide()
+        }
+        hiddenForFullscreen = false
         surface.show(at: geometry)
     }
 
     /// Takes the notch off screen.
     public func hide() {
+        hiddenForFullscreen = false
         surface.hide()
     }
 
@@ -123,7 +136,29 @@ public final class Notch {
         surface.peek(for: duration)
     }
 
+    private func spaceChanged() {
+        if configuration.hidesInFullscreen {
+            recheckFullscreen()
+            // The backdrop that marks a full-screen Space can land a moment
+            // after the Space change is announced.
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.fullscreenRecheckDelay) { [weak self] in
+                self?.recheckFullscreen()
+            }
+        }
+        surface.bringForward()
+    }
+
+    private static let fullscreenRecheckDelay: TimeInterval = 0.5
+
+    /// Hides or restores the notch for the Space now showing, if the app
+    /// wants it on screen at all.
+    private func recheckFullscreen() {
+        guard surface.isShown || hiddenForFullscreen else { return }
+        show()
+    }
+
     private func screensChanged() {
+        if hiddenForFullscreen { return recheckFullscreen() }
         guard surface.isShown else { return }
         guard let geometry = NotchGeometry.current else { return hide() }
         surface.move(to: geometry)
