@@ -19,12 +19,16 @@ public struct NotchConfiguration {
     /// Space, and puts it back afterwards. Off by default: the notch stays.
     public var hidesInFullscreen = false
 
+    /// The defaults; change the properties you need.
     public init() {}
 }
 
 /// A horizontal two-finger swipe on the notch, in finger direction.
 public enum NotchSwipe {
-    case left, right
+    /// The fingers moved left.
+    case left
+    /// The fingers moved right.
+    case right
 }
 
 /// The app's presence in the notch, and the one place that decides what it

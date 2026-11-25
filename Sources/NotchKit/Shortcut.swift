@@ -10,10 +10,12 @@ import Carbon.HIToolbox
 
 /// A key plus modifiers, in Carbon terms so it can be registered directly.
 public struct Shortcut: Equatable, Sendable {
+    /// Virtual key code (`kVK_…`).
     public var keyCode: UInt32
     /// Carbon modifier mask (`cmdKey`, `optionKey`, `controlKey`, `shiftKey`).
     public var modifiers: UInt32
 
+    /// A shortcut from a virtual key code and a Carbon modifier mask.
     public init(keyCode: UInt32, modifiers: UInt32) {
         self.keyCode = keyCode
         self.modifiers = modifiers
