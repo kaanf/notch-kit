@@ -18,7 +18,7 @@ macOS 14 or later, Swift 5.9 or later, no dependencies.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/kaanf/NotchKit.git", branch: "main"),
+    .package(url: "https://github.com/kaanf/notch-kit.git", branch: "main"),
 ]
 ```
 
